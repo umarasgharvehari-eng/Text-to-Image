@@ -1,20 +1,20 @@
-import io, time, base64, traceback
+import os, io, time, base64, traceback
 import streamlit as st
 import torch
 from PIL import Image
-from diffusers import AutoPipelineForText2Image
+
+# ✅ IMPORTANT: set cache dirs BEFORE importing diffusers/transformers heavy stuff
+os.environ["HF_HOME"] = os.path.join(os.getcwd(), ".cache", "huggingface")
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(os.getcwd(), ".cache", "huggingface", "hub")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(os.getcwd(), ".cache", "huggingface", "transformers")
 
 st.set_page_config(page_title="Studio • Midjourney-style", page_icon="✨", layout="wide")
 
 # ---------- CSS ----------
 st.markdown("""
 <style>
-:root{
-  --bg0:#070915; --bg1:#0b1020;
-  --card:rgba(255,255,255,.045);
-  --stroke:rgba(255,255,255,.10);
-  --text:#e5e7eb; --muted:rgba(229,231,235,.70);
-}
+:root{ --bg0:#070915; --bg1:#0b1020; --card:rgba(255,255,255,.045); --stroke:rgba(255,255,255,.10);
+--text:#e5e7eb; --muted:rgba(229,231,235,.70);}
 [data-testid="stAppViewContainer"]{
   background:
     radial-gradient(1200px 600px at 10% 0%, rgba(124,58,237,.20), transparent 60%),
@@ -23,76 +23,53 @@ st.markdown("""
     linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%);
   color: var(--text);
 }
-.block-container{ max-width: 1260px; padding-top: 1rem; padding-bottom: 2rem; }
+.block-container{ max-width:1260px; padding-top:1rem; padding-bottom:2rem;}
 .topbar{
   display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;
-  border:1px solid var(--stroke);
-  background: rgba(255,255,255,.035);
+  border:1px solid var(--stroke); background: rgba(255,255,255,.035);
   box-shadow: 0 18px 60px rgba(0,0,0,.45);
-  border-radius: 18px;
-  padding: 14px 16px;
-  margin-bottom: 14px;
+  border-radius: 18px; padding:14px 16px; margin-bottom:14px;
 }
 .pill{
   display:inline-flex; align-items:center; gap:8px;
   padding:6px 10px; border-radius:999px;
   border:1px solid rgba(124,58,237,.35);
-  background: rgba(124,58,237,.12);
-  font-size: 12px;
+  background: rgba(124,58,237,.12); font-size:12px;
 }
 .card{
-  border:1px solid var(--stroke);
-  background: var(--card);
-  border-radius: 18px;
-  padding: 14px;
-  box-shadow: 0 18px 55px rgba(0,0,0,.38);
+  border:1px solid var(--stroke); background: var(--card);
+  border-radius:18px; padding:14px; box-shadow: 0 18px 55px rgba(0,0,0,.38);
 }
-.h{ font-size: 14px; font-weight: 800; }
-.hint{ font-size:12px; color: var(--muted); }
-
+.h{ font-size:14px; font-weight:800;}
+.hint{ font-size:12px; color: var(--muted);}
 div[data-testid="stTextArea"] textarea{
   background: rgba(15,23,42,.82) !important;
   color: var(--text) !important;
   border: 1px solid rgba(255,255,255,.12) !important;
   border-radius: 14px !important;
   font-size: 15px !important;
-  line-height: 1.35 !important;
   padding: 14px !important;
   min-height: 130px !important;
 }
 div[data-testid="stTextArea"] textarea::placeholder{ color: rgba(229,231,235,.45) !important; }
-
 .stButton button{
-  width:100%;
-  border-radius: 14px;
-  padding: .72rem 1rem;
-  border: 1px solid rgba(255,255,255,.10);
+  width:100%; border-radius:14px; padding:.72rem 1rem;
+  border:1px solid rgba(255,255,255,.10);
   background: linear-gradient(135deg, rgba(124,58,237,.95), rgba(96,165,250,.70));
-  color: #0b1020;
-  font-weight: 950;
+  color:#0b1020; font-weight:950;
 }
 .stDownloadButton button{
-  width:100%;
-  border-radius: 14px;
-  padding: .65rem 1rem;
-  border: 1px solid rgba(255,255,255,.14);
+  width:100%; border-radius:14px; padding:.65rem 1rem;
+  border:1px solid rgba(255,255,255,.14);
   background: rgba(255,255,255,.06);
-  color: var(--text);
-  font-weight: 850;
+  color: var(--text); font-weight:850;
 }
 .toast{
   border:1px solid rgba(34,197,94,.35);
   background: rgba(34,197,94,.12);
-  border-radius: 14px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
+  border-radius:14px; padding:10px 12px; margin-bottom:10px;
 }
-.imgbox{
-  border:1px solid rgba(255,255,255,.10);
-  border-radius: 16px;
-  overflow:hidden;
-  background: rgba(255,255,255,.03);
-}
+.imgbox{ border:1px solid rgba(255,255,255,.10); border-radius:16px; overflow:hidden; background: rgba(255,255,255,.03); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -105,11 +82,13 @@ st.markdown("""
       <div style="font-size:12px; opacity:.75;">Midjourney-style • Open-weights • No API keys</div>
     </div>
   </div>
-  <div class="pill">🖼️ Text → Image • Turbo</div>
+  <div class="pill">🖼️ Text → Image</div>
 </div>
 """, unsafe_allow_html=True)
 
 IS_GPU = torch.cuda.is_available()
+
+# ✅ Streamlit Cloud is CPU => use sd-turbo (fastest)
 MODEL_ID = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -117,17 +96,19 @@ def pil_to_png_bytes(img: Image.Image) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-def png_bytes_to_b64(b: bytes) -> str:
+def b64_from_bytes(b: bytes) -> str:
     return base64.b64encode(b).decode("utf-8")
 
-def show_b64_image(b64: str):
+def show_b64(b64: str):
     st.markdown(
         f'<div class="imgbox"><img src="data:image/png;base64,{b64}" style="width:100%; display:block;"></div>',
         unsafe_allow_html=True
     )
 
+# ✅ Lazy import + lazy load (prevents healthz crash)
 @st.cache_resource(show_spinner=False)
-def get_pipe(model_id: str):
+def get_pipe_lazy(model_id: str):
+    from diffusers import AutoPipelineForText2Image  # import only when needed
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     pipe = AutoPipelineForText2Image.from_pretrained(
         model_id,
@@ -139,23 +120,19 @@ def get_pipe(model_id: str):
         pipe = pipe.to("cuda")
     return pipe
 
-# -------- state --------
+# ----- state -----
 if "history" not in st.session_state:
-    st.session_state.history = []  # {prompt, b64_list:[str], bytes_list:[bytes], ts}
+    st.session_state.history = []  # {prompt, b64, bytes, ts}
 if "prompt" not in st.session_state:
     st.session_state.prompt = ""
 
-# sanitize history to avoid crashes
-clean = []
-for item in st.session_state.history:
-    b64_list = item.get("b64_list")
-    bytes_list = item.get("bytes_list")
-    if isinstance(b64_list, list) and b64_list and isinstance(b64_list[0], str) and len(b64_list[0]) > 50:
-        if isinstance(bytes_list, list) and bytes_list and isinstance(bytes_list[0], (bytes, bytearray)):
-            clean.append(item)
-st.session_state.history = clean
+# sanitize
+st.session_state.history = [
+    x for x in st.session_state.history
+    if isinstance(x.get("b64"), str) and len(x.get("b64")) > 50 and isinstance(x.get("bytes"), (bytes, bytearray))
+]
 
-# -------- Sidebar (FAST CPU) --------
+# ----- sidebar -----
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
     st.write("GPU:", "✅" if IS_GPU else "❌ (CPU mode)")
@@ -164,16 +141,14 @@ with st.sidebar:
     if IS_GPU:
         steps = st.selectbox("Steps", [2, 3, 5], index=1)
         w, h = 768, 768
-        n_images = st.slider("Grid images", 1, 4, 4)
     else:
         steps = 1
         w, h = 384, 384
-        n_images = 1
-        st.info("CPU Fast Mode: 384×384 • 1 step • 1 image")
+        st.info("CPU Fast Mode: 384×384 • 1 step")
 
     seed = st.number_input("Seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
 
-# -------- Layout --------
+# ----- layout -----
 left, right = st.columns([1.1, 1], gap="large")
 
 with left:
@@ -194,59 +169,54 @@ with left:
         generate = st.button("✨ Generate")
     with c2:
         clear = st.button("🧹 Clear history")
-
     st.markdown('</div>', unsafe_allow_html=True)
 
 if clear:
     st.session_state.history = []
     st.rerun()
 
-# -------- Generate --------
+# ----- generate -----
 if generate:
     if not prompt.strip():
         st.warning("Please enter a prompt.")
     else:
         try:
             with st.spinner("Loading model (first time can take a while)..."):
-                pipe = get_pipe(MODEL_ID)
+                pipe = get_pipe_lazy(MODEL_ID)
 
             with st.spinner("Generating..."):
-                g = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
-                g = g.manual_seed(int(seed))
+                gen = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
+                gen = gen.manual_seed(int(seed))
 
-                bytes_list, b64_list = [], []
-                for _ in range(int(n_images)):
-                    result = pipe(
-                        prompt=prompt.strip(),
-                        num_inference_steps=int(steps),
-                        guidance_scale=0.0,
-                        width=int(w),
-                        height=int(h),
-                        generator=g,
-                    )
-                    pil_img = result.images[0]
-                    png_bytes = pil_to_png_bytes(pil_img)
+                result = pipe(
+                    prompt=prompt.strip(),
+                    num_inference_steps=int(steps),
+                    guidance_scale=0.0,
+                    width=int(w),
+                    height=int(h),
+                    generator=gen,
+                )
+                pil_img = result.images[0]
+                png_bytes = pil_to_png_bytes(pil_img)
 
-                    # hard validation
-                    if not isinstance(png_bytes, (bytes, bytearray)) or len(png_bytes) < 1000:
-                        raise RuntimeError("Invalid PNG bytes produced (too small / empty).")
+                if len(png_bytes) < 1000:
+                    raise RuntimeError("Invalid image bytes produced.")
 
-                    bytes_list.append(png_bytes)
-                    b64_list.append(png_bytes_to_b64(png_bytes))
+                b64 = b64_from_bytes(png_bytes)
 
             st.session_state.history.insert(0, {
                 "prompt": prompt.strip(),
-                "bytes_list": bytes_list,
-                "b64_list": b64_list,
+                "bytes": png_bytes,
+                "b64": b64,
                 "ts": time.strftime("%H:%M:%S"),
             })
             st.rerun()
 
         except Exception as e:
-            st.error("Generation failed (CPU limits / timeout / memory).")
+            st.error("Generation failed (Streamlit Cloud CPU limits / timeout / memory).")
             st.code("".join(traceback.format_exception(type(e), e, e.__traceback__)))
 
-# -------- Gallery (NO st.image) --------
+# ----- gallery -----
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">'
@@ -258,17 +228,8 @@ with right:
         st.markdown('<div class="toast">✅ Render completed</div>', unsafe_allow_html=True)
         st.caption(latest["prompt"])
 
-        b64_0 = latest["b64_list"][0]
-        bytes_0 = latest["bytes_list"][0]
-
-        show_b64_image(b64_0)
-
-        st.download_button(
-            "⬇️ Download PNG",
-            data=bytes_0,
-            file_name="generated.png",
-            mime="image/png"
-        )
+        show_b64(latest["b64"])
+        st.download_button("⬇️ Download PNG", data=latest["bytes"], file_name="generated.png", mime="image/png")
     else:
         st.info("No renders yet. Write a prompt and click **Generate**.")
 
