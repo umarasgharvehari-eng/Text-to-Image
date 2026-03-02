@@ -13,9 +13,7 @@ st.markdown("""
   --bg0:#070915; --bg1:#0b1020;
   --card:rgba(255,255,255,.045);
   --stroke:rgba(255,255,255,.10);
-  --stroke2:rgba(255,255,255,.16);
   --text:#e5e7eb; --muted:rgba(229,231,235,.70);
-  --p:#7c3aed; --b:#60a5fa; --g:#22c55e;
 }
 [data-testid="stAppViewContainer"]{
   background:
@@ -25,7 +23,7 @@ st.markdown("""
     linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%);
   color: var(--text);
 }
-.block-container{ max-width: 1260px; padding-top: 1.0rem; padding-bottom: 2.0rem; }
+.block-container{ max-width: 1260px; padding-top: 1rem; padding-bottom: 2rem; }
 .topbar{
   display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;
   border:1px solid var(--stroke);
@@ -63,11 +61,6 @@ div[data-testid="stTextArea"] textarea{
   min-height: 130px !important;
 }
 div[data-testid="stTextArea"] textarea::placeholder{ color: rgba(229,231,235,.45) !important; }
-div[data-testid="stTextArea"] textarea:focus{
-  border: 1px solid rgba(124,58,237,.70) !important;
-  box-shadow: 0 0 0 1px rgba(124,58,237,.70);
-  outline: none !important;
-}
 
 .stButton button{
   width:100%;
@@ -113,20 +106,13 @@ st.markdown("""
 
 IS_GPU = torch.cuda.is_available()
 
-# ✅ For Streamlit Cloud (CPU), SDXL-Turbo is heavy.
-# If you want maximum stability, use sd-turbo:
-DEFAULT_MODEL = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
+# Streamlit Cloud is CPU → sd-turbo is more stable
+MODEL_ID = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
-
-def safe_as_pil(obj) -> Image.Image | None:
-    """Return a valid PIL image or None."""
-    if isinstance(obj, Image.Image):
-        return obj
-    return None
 
 @st.cache_resource(show_spinner=False)
 def get_pipe(model_id: str):
@@ -141,17 +127,29 @@ def get_pipe(model_id: str):
         pipe = pipe.to("cuda")
     return pipe
 
+# ---------- Session state ----------
+if "history" not in st.session_state:
+    st.session_state.history = []  # each: {prompt, files:[bytes], ts}
+if "prompt" not in st.session_state:
+    st.session_state.prompt = ""
+
+# ✅ sanitize old/broken history (prevents crashes after restart)
+clean = []
+for item in st.session_state.history:
+    files = item.get("files")
+    if isinstance(files, list) and files and isinstance(files[0], (bytes, bytearray)):
+        clean.append(item)
+st.session_state.history = clean
+
 # ---------- Sidebar ----------
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
     st.write("GPU:", "✅" if IS_GPU else "❌ (CPU mode)")
-    st.caption(f"Model: {DEFAULT_MODEL}")
+    st.caption(f"Model: {MODEL_ID}")
 
     if IS_GPU:
         steps = st.selectbox("Steps", [2, 3, 5], index=1)
-        aspect = st.selectbox("Aspect Ratio", ["1:1", "16:9", "9:16", "4:3", "3:4"], index=0)
-        ar_map = {"1:1":(768,768),"16:9":(1024,576),"9:16":(576,1024),"4:3":(896,672),"3:4":(672,896)}
-        width, height = ar_map[aspect]
+        width, height = 768, 768
         n_images = st.slider("Grid images", 1, 4, 4)
     else:
         steps = st.selectbox("Steps (CPU)", [1, 2, 3], index=1)
@@ -159,12 +157,6 @@ with st.sidebar:
         n_images = 1
 
     seed = st.number_input("Seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
-
-# ---------- Session state ----------
-if "history" not in st.session_state:
-    st.session_state.history = []   # each item: {prompt, images:[PIL], files:[bytes], ts}
-if "prompt" not in st.session_state:
-    st.session_state.prompt = ""
 
 # ---------- Layout ----------
 left, right = st.columns([1.1, 1], gap="large")
@@ -195,22 +187,20 @@ if clear:
     st.session_state.history = []
     st.rerun()
 
-# ---------- Generation (safe) ----------
+# ---------- Generate ----------
 if generate:
     if not prompt.strip():
         st.warning("Please enter a prompt.")
     else:
         try:
             with st.spinner("Loading model (first time can take a while)..."):
-                pipe = get_pipe(DEFAULT_MODEL)
+                pipe = get_pipe(MODEL_ID)
 
             with st.spinner("Generating..."):
                 g = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
                 g = g.manual_seed(int(seed))
 
-                images: list[Image.Image] = []
-                files: list[bytes] = []
-
+                files = []
                 for _ in range(int(n_images)):
                     result = pipe(
                         prompt=prompt.strip(),
@@ -220,30 +210,21 @@ if generate:
                         height=int(height),
                         generator=g,
                     )
-
-                    # result.images is expected
-                    candidate = result.images[0] if hasattr(result, "images") and result.images else None
-                    pil_img = safe_as_pil(candidate)
-
-                    if pil_img is None:
-                        raise TypeError(f"Pipeline returned invalid image type: {type(candidate)}")
-
-                    images.append(pil_img)
+                    pil_img = result.images[0]
                     files.append(pil_to_png_bytes(pil_img))
 
             st.session_state.history.insert(0, {
                 "prompt": prompt.strip(),
-                "images": images,
                 "files": files,
                 "ts": time.strftime("%H:%M:%S"),
             })
             st.rerun()
 
         except Exception as e:
-            st.error("Generation failed on the server (CPU limits / memory / timeout).")
+            st.error("Generation failed on server (CPU limits / memory / timeout).")
             st.code("".join(traceback.format_exception(type(e), e, e.__traceback__)))
 
-# ---------- Gallery ----------
+# ---------- Gallery (NO PIL, ONLY BYTES) ----------
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">'
@@ -255,12 +236,24 @@ with right:
         st.markdown('<div class="toast">✅ Render completed</div>', unsafe_allow_html=True)
         st.caption(latest["prompt"])
 
-        # ✅ Always safe now
-        img = latest["images"][0]
-        data = latest["files"][0]
-        st.image(img, use_container_width=True)
-        st.download_button("⬇️ Download PNG", data=data, file_name="generated.png", mime="image/png")
+        file0 = latest["files"][0]  # bytes
+        st.image(file0, use_container_width=True)  # ✅ always safe
+        st.download_button("⬇️ Download PNG", data=file0, file_name="generated.png", mime="image/png")
 
+        # if grid images, show more
+        if len(latest["files"]) > 1:
+            st.markdown("---")
+            cols = st.columns(2)
+            for i, b in enumerate(latest["files"]):
+                with cols[i % 2]:
+                    st.image(b, use_container_width=True)
+                    st.download_button(
+                        f"Download #{i+1}",
+                        data=b,
+                        file_name=f"generated_{i+1}.png",
+                        mime="image/png",
+                        key=f"dl_{i}",
+                    )
     else:
         st.info("No renders yet. Write a prompt and click **Generate**.")
 
