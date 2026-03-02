@@ -3,14 +3,26 @@ import streamlit as st
 import torch
 from PIL import Image
 
-# ✅ IMPORTANT: set cache dirs BEFORE importing diffusers/transformers heavy stuff
-os.environ["HF_HOME"] = os.path.join(os.getcwd(), ".cache", "huggingface")
-os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(os.getcwd(), ".cache", "huggingface", "hub")
-os.environ["TRANSFORMERS_CACHE"] = os.path.join(os.getcwd(), ".cache", "huggingface", "transformers")
-
+# ----------------- Streamlit config -----------------
 st.set_page_config(page_title="Studio • Midjourney-style", page_icon="✨", layout="wide")
 
-# ---------- CSS ----------
+# ----------------- Cache dirs (reduce re-downloads) -----------------
+APP_CACHE = os.path.join(os.getcwd(), ".cache")
+HF_HOME = os.path.join(APP_CACHE, "huggingface")
+os.makedirs(HF_HOME, exist_ok=True)
+
+os.environ["HF_HOME"] = HF_HOME
+os.environ["HUGGINGFACE_HUB_CACHE"] = os.path.join(HF_HOME, "hub")
+os.environ["TRANSFORMERS_CACHE"] = os.path.join(HF_HOME, "transformers")
+
+IS_GPU = torch.cuda.is_available()
+
+# ----------------- Models -----------------
+# CPU: prefer sd-turbo. If it fails, fallback to SD 1.5 (heavier but very stable).
+PRIMARY_MODEL = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
+FALLBACK_MODEL = "runwayml/stable-diffusion-v1-5"
+
+# ----------------- UI (CSS) -----------------
 st.markdown("""
 <style>
 :root{ --bg0:#070915; --bg1:#0b1020; --card:rgba(255,255,255,.045); --stroke:rgba(255,255,255,.10);
@@ -34,20 +46,19 @@ st.markdown("""
   display:inline-flex; align-items:center; gap:8px;
   padding:6px 10px; border-radius:999px;
   border:1px solid rgba(124,58,237,.35);
-  background: rgba(124,58,237,.12); font-size:12px;
+  background: rgba(124,58,237,.12); font-size: 12px;
 }
-.card{
-  border:1px solid var(--stroke); background: var(--card);
-  border-radius:18px; padding:14px; box-shadow: 0 18px 55px rgba(0,0,0,.38);
-}
-.h{ font-size:14px; font-weight:800;}
-.hint{ font-size:12px; color: var(--muted);}
+.card{ border:1px solid var(--stroke); background: var(--card); border-radius:18px; padding:14px;
+  box-shadow: 0 18px 55px rgba(0,0,0,.38); }
+.h{ font-size:14px; font-weight:800; }
+.hint{ font-size:12px; color: var(--muted); }
 div[data-testid="stTextArea"] textarea{
   background: rgba(15,23,42,.82) !important;
   color: var(--text) !important;
   border: 1px solid rgba(255,255,255,.12) !important;
   border-radius: 14px !important;
   font-size: 15px !important;
+  line-height: 1.35 !important;
   padding: 14px !important;
   min-height: 130px !important;
 }
@@ -70,10 +81,11 @@ div[data-testid="stTextArea"] textarea::placeholder{ color: rgba(229,231,235,.45
   border-radius:14px; padding:10px 12px; margin-bottom:10px;
 }
 .imgbox{ border:1px solid rgba(255,255,255,.10); border-radius:16px; overflow:hidden; background: rgba(255,255,255,.03); }
+small.muted{ color: rgba(229,231,235,.70); }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown("""
+st.markdown(f"""
 <div class="topbar">
   <div style="display:flex; align-items:center; gap:10px;">
     <div style="font-size:22px;">✨</div>
@@ -82,15 +94,11 @@ st.markdown("""
       <div style="font-size:12px; opacity:.75;">Midjourney-style • Open-weights • No API keys</div>
     </div>
   </div>
-  <div class="pill">🖼️ Text → Image</div>
+  <div class="pill">Model: {PRIMARY_MODEL}</div>
 </div>
 """, unsafe_allow_html=True)
 
-IS_GPU = torch.cuda.is_available()
-
-# ✅ Streamlit Cloud is CPU => use sd-turbo (fastest)
-MODEL_ID = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
-
+# ----------------- Helpers -----------------
 def pil_to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -105,10 +113,10 @@ def show_b64(b64: str):
         unsafe_allow_html=True
     )
 
-# ✅ Lazy import + lazy load (prevents healthz crash)
 @st.cache_resource(show_spinner=False)
-def get_pipe_lazy(model_id: str):
-    from diffusers import AutoPipelineForText2Image  # import only when needed
+def load_pipe(model_id: str):
+    # Lazy import: prevents startup crashes
+    from diffusers import AutoPipelineForText2Image
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     pipe = AutoPipelineForText2Image.from_pretrained(
         model_id,
@@ -120,41 +128,72 @@ def get_pipe_lazy(model_id: str):
         pipe = pipe.to("cuda")
     return pipe
 
-# ----- state -----
+def generate_with_model(model_id: str, prompt: str, seed: int, steps: int, width: int, height: int):
+    pipe = load_pipe(model_id)
+
+    # Turbo best practice: guidance 0.0
+    if "turbo" in model_id:
+        guidance = 0.0
+    else:
+        guidance = 7.0
+
+    gen = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
+    gen = gen.manual_seed(int(seed))
+
+    out = pipe(
+        prompt=prompt,
+        num_inference_steps=int(steps),
+        guidance_scale=float(guidance),
+        width=int(width),
+        height=int(height),
+        generator=gen,
+    )
+    img = out.images[0]
+    png = pil_to_png_bytes(img)
+    if not isinstance(png, (bytes, bytearray)) or len(png) < 1000:
+        raise RuntimeError("Invalid PNG output (empty/too small).")
+    return png, guidance
+
+# ----------------- State -----------------
 if "history" not in st.session_state:
-    st.session_state.history = []  # {prompt, b64, bytes, ts}
+    st.session_state.history = []  # {prompt, bytes, b64, model, steps, size, seconds}
 if "prompt" not in st.session_state:
     st.session_state.prompt = ""
 
-# sanitize
+# sanitize history
 st.session_state.history = [
     x for x in st.session_state.history
     if isinstance(x.get("b64"), str) and len(x.get("b64")) > 50 and isinstance(x.get("bytes"), (bytes, bytearray))
 ]
 
-# ----- sidebar -----
+# ----------------- Sidebar -----------------
 with st.sidebar:
-    st.markdown("### ⚙️ Controls")
+    st.markdown("### ⚙️ Settings")
+
     st.write("GPU:", "✅" if IS_GPU else "❌ (CPU mode)")
-    st.caption(f"Model: {MODEL_ID}")
+    st.caption("Streamlit Cloud is usually CPU-only, so generation can be slow.")
 
     if IS_GPU:
         steps = st.selectbox("Steps", [2, 3, 5], index=1)
-        w, h = 768, 768
+        size = st.selectbox("Size", ["768x768", "1024x576", "576x1024"], index=0)
+        width, height = map(int, size.split("x"))
     else:
-        steps = 1
-        w, h = 384, 384
-        st.info("CPU Fast Mode: 384×384 • 1 step")
+        # CPU safe & faster
+        steps = st.selectbox("Steps (CPU)", [1, 2, 3], index=1)
+        size = st.selectbox("Size (CPU)", ["384x384", "448x448", "512x512"], index=0)
+        width, height = map(int, size.split("x"))
 
     seed = st.number_input("Seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
+    st.divider()
+    st.caption("Tip: Start with **384×384** and **2 steps** on CPU.")
 
-# ----- layout -----
+# ----------------- Main layout -----------------
 left, right = st.columns([1.1, 1], gap="large")
 
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">'
-                '<div class="h">✍️ Imagine</div><div class="hint">subject • style • lighting • lens • mood</div></div>',
+                '<div class="h">✍️ Prompt</div><div class="hint">subject • style • lighting • lens • mood</div></div>',
                 unsafe_allow_html=True)
 
     prompt = st.text_area(
@@ -168,47 +207,43 @@ with left:
     with c1:
         generate = st.button("✨ Generate")
     with c2:
-        clear = st.button("🧹 Clear history")
+        clear = st.button("🧹 Clear")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
 if clear:
     st.session_state.history = []
     st.rerun()
 
-# ----- generate -----
+# ----------------- Generate (with fallback) -----------------
 if generate:
     if not prompt.strip():
         st.warning("Please enter a prompt.")
     else:
         try:
-            with st.spinner("Loading model (first time can take a while)..."):
-                pipe = get_pipe_lazy(MODEL_ID)
+            t0 = time.time()
+            with st.spinner("Loading + generating (first time can take a while on CPU)..."):
+                # Try primary model first
+                try:
+                    png, guidance = generate_with_model(PRIMARY_MODEL, prompt.strip(), seed, steps, width, height)
+                    used_model = PRIMARY_MODEL
+                except Exception:
+                    # Fallback if primary fails
+                    png, guidance = generate_with_model(FALLBACK_MODEL, prompt.strip(), seed, steps, width, height)
+                    used_model = FALLBACK_MODEL
 
-            with st.spinner("Generating..."):
-                gen = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
-                gen = gen.manual_seed(int(seed))
-
-                result = pipe(
-                    prompt=prompt.strip(),
-                    num_inference_steps=int(steps),
-                    guidance_scale=0.0,
-                    width=int(w),
-                    height=int(h),
-                    generator=gen,
-                )
-                pil_img = result.images[0]
-                png_bytes = pil_to_png_bytes(pil_img)
-
-                if len(png_bytes) < 1000:
-                    raise RuntimeError("Invalid image bytes produced.")
-
-                b64 = b64_from_bytes(png_bytes)
+            sec = round(time.time() - t0, 2)
+            b64 = b64_from_bytes(png)
 
             st.session_state.history.insert(0, {
                 "prompt": prompt.strip(),
-                "bytes": png_bytes,
+                "bytes": png,
                 "b64": b64,
-                "ts": time.strftime("%H:%M:%S"),
+                "model": used_model,
+                "steps": steps,
+                "size": f"{width}x{height}",
+                "seconds": sec,
+                "guidance": guidance,
             })
             st.rerun()
 
@@ -216,21 +251,28 @@ if generate:
             st.error("Generation failed (Streamlit Cloud CPU limits / timeout / memory).")
             st.code("".join(traceback.format_exception(type(e), e, e.__traceback__)))
 
-# ----- gallery -----
+# ----------------- Gallery -----------------
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">'
-                '<div class="h">🖼️ Gallery</div><div class="hint">Latest render at the top</div></div>',
+                '<div class="h">🖼️ Result</div><div class="hint">Latest render</div></div>',
                 unsafe_allow_html=True)
 
     if st.session_state.history:
-        latest = st.session_state.history[0]
+        item = st.session_state.history[0]
         st.markdown('<div class="toast">✅ Render completed</div>', unsafe_allow_html=True)
-        st.caption(latest["prompt"])
+        st.caption(item["prompt"])
+        st.markdown(f"<small class='muted'>Model: <b>{item['model']}</b> • Size: <b>{item['size']}</b> • Steps: <b>{item['steps']}</b> • Guidance: <b>{item['guidance']}</b> • Time: <b>{item['seconds']}s</b></small>", unsafe_allow_html=True)
 
-        show_b64(latest["b64"])
-        st.download_button("⬇️ Download PNG", data=latest["bytes"], file_name="generated.png", mime="image/png")
+        show_b64(item["b64"])
+
+        st.download_button(
+            "⬇️ Download PNG",
+            data=item["bytes"],
+            file_name="generated.png",
+            mime="image/png",
+        )
     else:
-        st.info("No renders yet. Write a prompt and click **Generate**.")
+        st.info("No image yet. Enter a prompt and click **Generate**.")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
