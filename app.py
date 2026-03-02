@@ -172,12 +172,12 @@ def get_groq_key() -> str | None:
         return st.secrets["GROQ_API_KEY"]
     return os.getenv("GROQ_API_KEY")
 
-import requests
-
 def enhance_prompt_with_groq(user_prompt: str, goal: str) -> str:
     api_key = get_groq_key()
     if not api_key:
         return user_prompt
+
+    api_key = api_key.strip()
 
     system = (
         "You are an expert Midjourney-style prompt engineer for text-to-image diffusion models. "
@@ -185,29 +185,51 @@ def enhance_prompt_with_groq(user_prompt: str, goal: str) -> str:
         "Do NOT include any text overlays, logos, watermarks, or written words. "
         "Return ONLY the rewritten prompt text."
     )
-
     user = f"Goal: {goal}\nUser prompt: {user_prompt}\nRewrite now:"
 
     url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "llama-3.1-70b-versatile",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.6,
-        "max_tokens": 220,
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
-    r = requests.post(url, headers=headers, json=payload, timeout=60)
-    r.raise_for_status()
-    data = r.json()
+    # ✅ model fallback (some accounts don’t have all models enabled)
+    model_candidates = [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+    ]
 
-    return data["choices"][0]["message"]["content"].strip()
+    last_err = None
+
+    for model in model_candidates:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.6,
+            "max_tokens": 220,
+        }
+
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=60)
+
+            # If error, capture body for debugging
+            if r.status_code != 200:
+                last_err = f"Groq HTTP {r.status_code} for model={model}\nResponse: {r.text}"
+                continue
+
+            data = r.json()
+            return data["choices"][0]["message"]["content"].strip()
+
+        except Exception as e:
+            last_err = f"Groq request failed for model={model}: {e}"
+
+    # ✅ Don’t crash app; show error and return original prompt
+    st.warning("Groq prompt enhancement failed. Using your original prompt.")
+    if last_err:
+        st.code(last_err)
+    return user_prompt
 
 # ----------------- Diffusers load/generate -----------------
 @st.cache_resource(show_spinner=False)
