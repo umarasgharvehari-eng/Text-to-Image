@@ -6,7 +6,6 @@ from diffusers import AutoPipelineForText2Image
 
 st.set_page_config(page_title="Studio • Midjourney-style", page_icon="✨", layout="wide")
 
-# ---------- CSS (MJ style) ----------
 st.markdown("""
 <style>
 :root{
@@ -90,7 +89,6 @@ div[data-testid="stTextArea"] textarea::placeholder{ color: rgba(229,231,235,.45
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Header ----------
 st.markdown("""
 <div class="topbar">
   <div style="display:flex; align-items:center; gap:10px;">
@@ -106,7 +104,7 @@ st.markdown("""
 
 IS_GPU = torch.cuda.is_available()
 
-# Streamlit Cloud is CPU → sd-turbo is more stable
+# ✅ CPU: use sd-turbo always
 MODEL_ID = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
@@ -127,13 +125,13 @@ def get_pipe(model_id: str):
         pipe = pipe.to("cuda")
     return pipe
 
-# ---------- Session state ----------
+# --- state ---
 if "history" not in st.session_state:
-    st.session_state.history = []  # each: {prompt, files:[bytes], ts}
+    st.session_state.history = []  # {prompt, files:[bytes], ts}
 if "prompt" not in st.session_state:
     st.session_state.prompt = ""
 
-# ✅ sanitize old/broken history (prevents crashes after restart)
+# sanitize history
 clean = []
 for item in st.session_state.history:
     files = item.get("files")
@@ -141,7 +139,7 @@ for item in st.session_state.history:
         clean.append(item)
 st.session_state.history = clean
 
-# ---------- Sidebar ----------
+# ---------- Sidebar (FAST CPU settings) ----------
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
     st.write("GPU:", "✅" if IS_GPU else "❌ (CPU mode)")
@@ -149,16 +147,18 @@ with st.sidebar:
 
     if IS_GPU:
         steps = st.selectbox("Steps", [2, 3, 5], index=1)
-        width, height = 768, 768
+        size = st.selectbox("Size", ["768x768", "1024x576", "576x1024"], index=0)
+        w, h = map(int, size.split("x"))
         n_images = st.slider("Grid images", 1, 4, 4)
     else:
-        steps = st.selectbox("Steps (CPU)", [1, 2, 3], index=1)
-        width, height = 512, 512
+        # ✅ FAST defaults
+        steps = 1
+        w, h = 384, 384
         n_images = 1
+        st.info("CPU Fast Mode: 384×384 • 1 step • 1 image")
 
     seed = st.number_input("Seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
 
-# ---------- Layout ----------
 left, right = st.columns([1.1, 1], gap="large")
 
 with left:
@@ -170,7 +170,6 @@ with left:
     prompt = st.text_area(
         "Prompt",
         value=st.session_state.prompt or "A cinematic photo of a neon-lit street market in Tokyo, rain reflections, ultra detailed, 35mm, shallow depth of field, moody atmosphere",
-        placeholder="Try: a cyberpunk cat astronaut, cinematic, volumetric light, ultra detailed",
         label_visibility="collapsed",
     )
     st.session_state.prompt = prompt
@@ -196,7 +195,7 @@ if generate:
             with st.spinner("Loading model (first time can take a while)..."):
                 pipe = get_pipe(MODEL_ID)
 
-            with st.spinner("Generating..."):
+            with st.spinner("Generating (CPU is slow; please wait)..."):
                 g = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
                 g = g.manual_seed(int(seed))
 
@@ -206,8 +205,8 @@ if generate:
                         prompt=prompt.strip(),
                         num_inference_steps=int(steps),
                         guidance_scale=0.0,
-                        width=int(width),
-                        height=int(height),
+                        width=int(w),
+                        height=int(h),
                         generator=g,
                     )
                     pil_img = result.images[0]
@@ -221,10 +220,10 @@ if generate:
             st.rerun()
 
         except Exception as e:
-            st.error("Generation failed on server (CPU limits / memory / timeout).")
+            st.error("Generation failed (CPU limits / memory / timeout).")
             st.code("".join(traceback.format_exception(type(e), e, e.__traceback__)))
 
-# ---------- Gallery (NO PIL, ONLY BYTES) ----------
+# ---------- Gallery ----------
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">'
@@ -236,24 +235,9 @@ with right:
         st.markdown('<div class="toast">✅ Render completed</div>', unsafe_allow_html=True)
         st.caption(latest["prompt"])
 
-        file0 = latest["files"][0]  # bytes
-        st.image(file0, use_container_width=True)  # ✅ always safe
+        file0 = latest["files"][0]
+        st.image(file0, use_container_width=True)
         st.download_button("⬇️ Download PNG", data=file0, file_name="generated.png", mime="image/png")
-
-        # if grid images, show more
-        if len(latest["files"]) > 1:
-            st.markdown("---")
-            cols = st.columns(2)
-            for i, b in enumerate(latest["files"]):
-                with cols[i % 2]:
-                    st.image(b, use_container_width=True)
-                    st.download_button(
-                        f"Download #{i+1}",
-                        data=b,
-                        file_name=f"generated_{i+1}.png",
-                        mime="image/png",
-                        key=f"dl_{i}",
-                    )
     else:
         st.info("No renders yet. Write a prompt and click **Generate**.")
 
