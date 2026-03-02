@@ -1,6 +1,7 @@
 import os, io, time, base64, traceback
 import streamlit as st
 import torch
+import requests
 from PIL import Image, ImageDraw, ImageFont
 
 # ----------------- Streamlit config -----------------
@@ -171,40 +172,42 @@ def get_groq_key() -> str | None:
         return st.secrets["GROQ_API_KEY"]
     return os.getenv("GROQ_API_KEY")
 
+import requests
+
 def enhance_prompt_with_groq(user_prompt: str, goal: str) -> str:
-    """
-    goal: short description like 'luxury gym poster background'
-    """
     api_key = get_groq_key()
     if not api_key:
-        return user_prompt  # no Groq key => return as-is
-
-    from groq import Groq
-    client = Groq(api_key=api_key)
+        return user_prompt
 
     system = (
         "You are an expert Midjourney-style prompt engineer for text-to-image diffusion models. "
-        "Rewrite the user's prompt into a single, concise, highly visual prompt for photorealistic results. "
+        "Rewrite the user's prompt into a single concise, highly visual prompt for photorealistic results. "
         "Do NOT include any text overlays, logos, watermarks, or written words. "
-        "Focus on: subject, environment, camera/lens, lighting, composition, realism. "
         "Return ONLY the rewritten prompt text."
     )
 
-    user = f"""
-Goal: {goal}
-User prompt: {user_prompt}
+    user = f"Goal: {goal}\nUser prompt: {user_prompt}\nRewrite now:"
 
-Rewrite now:
-""".strip()
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "llama-3.1-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.6,
+        "max_tokens": 220,
+    }
 
-    # model choice: pick a common Groq chat model name; change if your account uses a different one
-    resp = client.chat.completions.create(
-        model="llama-3.1-70b-versatile",
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.6,
-        max_tokens=220,
-    )
-    return resp.choices[0].message.content.strip()
+    r = requests.post(url, headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+
+    return data["choices"][0]["message"]["content"].strip()
 
 # ----------------- Diffusers load/generate -----------------
 @st.cache_resource(show_spinner=False)
