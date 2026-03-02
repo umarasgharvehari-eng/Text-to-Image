@@ -1,4 +1,4 @@
-import io, time, traceback
+import io, time, base64, traceback
 import streamlit as st
 import torch
 from PIL import Image
@@ -6,6 +6,7 @@ from diffusers import AutoPipelineForText2Image
 
 st.set_page_config(page_title="Studio • Midjourney-style", page_icon="✨", layout="wide")
 
+# ---------- CSS ----------
 st.markdown("""
 <style>
 :root{
@@ -86,6 +87,12 @@ div[data-testid="stTextArea"] textarea::placeholder{ color: rgba(229,231,235,.45
   padding: 10px 12px;
   margin-bottom: 10px;
 }
+.imgbox{
+  border:1px solid rgba(255,255,255,.10);
+  border-radius: 16px;
+  overflow:hidden;
+  background: rgba(255,255,255,.03);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -103,14 +110,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 IS_GPU = torch.cuda.is_available()
-
-# ✅ CPU: use sd-turbo always
 MODEL_ID = "stabilityai/sd-turbo" if not IS_GPU else "stabilityai/sdxl-turbo"
 
 def pil_to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+def png_bytes_to_b64(b: bytes) -> str:
+    return base64.b64encode(b).decode("utf-8")
+
+def show_b64_image(b64: str):
+    st.markdown(
+        f'<div class="imgbox"><img src="data:image/png;base64,{b64}" style="width:100%; display:block;"></div>',
+        unsafe_allow_html=True
+    )
 
 @st.cache_resource(show_spinner=False)
 def get_pipe(model_id: str):
@@ -125,21 +139,23 @@ def get_pipe(model_id: str):
         pipe = pipe.to("cuda")
     return pipe
 
-# --- state ---
+# -------- state --------
 if "history" not in st.session_state:
-    st.session_state.history = []  # {prompt, files:[bytes], ts}
+    st.session_state.history = []  # {prompt, b64_list:[str], bytes_list:[bytes], ts}
 if "prompt" not in st.session_state:
     st.session_state.prompt = ""
 
-# sanitize history
+# sanitize history to avoid crashes
 clean = []
 for item in st.session_state.history:
-    files = item.get("files")
-    if isinstance(files, list) and files and isinstance(files[0], (bytes, bytearray)):
-        clean.append(item)
+    b64_list = item.get("b64_list")
+    bytes_list = item.get("bytes_list")
+    if isinstance(b64_list, list) and b64_list and isinstance(b64_list[0], str) and len(b64_list[0]) > 50:
+        if isinstance(bytes_list, list) and bytes_list and isinstance(bytes_list[0], (bytes, bytearray)):
+            clean.append(item)
 st.session_state.history = clean
 
-# ---------- Sidebar (FAST CPU settings) ----------
+# -------- Sidebar (FAST CPU) --------
 with st.sidebar:
     st.markdown("### ⚙️ Controls")
     st.write("GPU:", "✅" if IS_GPU else "❌ (CPU mode)")
@@ -147,11 +163,9 @@ with st.sidebar:
 
     if IS_GPU:
         steps = st.selectbox("Steps", [2, 3, 5], index=1)
-        size = st.selectbox("Size", ["768x768", "1024x576", "576x1024"], index=0)
-        w, h = map(int, size.split("x"))
+        w, h = 768, 768
         n_images = st.slider("Grid images", 1, 4, 4)
     else:
-        # ✅ FAST defaults
         steps = 1
         w, h = 384, 384
         n_images = 1
@@ -159,6 +173,7 @@ with st.sidebar:
 
     seed = st.number_input("Seed", min_value=0, max_value=2_147_483_647, value=42, step=1)
 
+# -------- Layout --------
 left, right = st.columns([1.1, 1], gap="large")
 
 with left:
@@ -186,7 +201,7 @@ if clear:
     st.session_state.history = []
     st.rerun()
 
-# ---------- Generate ----------
+# -------- Generate --------
 if generate:
     if not prompt.strip():
         st.warning("Please enter a prompt.")
@@ -195,11 +210,11 @@ if generate:
             with st.spinner("Loading model (first time can take a while)..."):
                 pipe = get_pipe(MODEL_ID)
 
-            with st.spinner("Generating (CPU is slow; please wait)..."):
+            with st.spinner("Generating..."):
                 g = torch.Generator(device="cuda") if IS_GPU else torch.Generator()
                 g = g.manual_seed(int(seed))
 
-                files = []
+                bytes_list, b64_list = [], []
                 for _ in range(int(n_images)):
                     result = pipe(
                         prompt=prompt.strip(),
@@ -210,20 +225,28 @@ if generate:
                         generator=g,
                     )
                     pil_img = result.images[0]
-                    files.append(pil_to_png_bytes(pil_img))
+                    png_bytes = pil_to_png_bytes(pil_img)
+
+                    # hard validation
+                    if not isinstance(png_bytes, (bytes, bytearray)) or len(png_bytes) < 1000:
+                        raise RuntimeError("Invalid PNG bytes produced (too small / empty).")
+
+                    bytes_list.append(png_bytes)
+                    b64_list.append(png_bytes_to_b64(png_bytes))
 
             st.session_state.history.insert(0, {
                 "prompt": prompt.strip(),
-                "files": files,
+                "bytes_list": bytes_list,
+                "b64_list": b64_list,
                 "ts": time.strftime("%H:%M:%S"),
             })
             st.rerun()
 
         except Exception as e:
-            st.error("Generation failed (CPU limits / memory / timeout).")
+            st.error("Generation failed (CPU limits / timeout / memory).")
             st.code("".join(traceback.format_exception(type(e), e, e.__traceback__)))
 
-# ---------- Gallery ----------
+# -------- Gallery (NO st.image) --------
 with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">'
@@ -235,9 +258,17 @@ with right:
         st.markdown('<div class="toast">✅ Render completed</div>', unsafe_allow_html=True)
         st.caption(latest["prompt"])
 
-        file0 = latest["files"][0]
-        st.image(file0, use_container_width=True)
-        st.download_button("⬇️ Download PNG", data=file0, file_name="generated.png", mime="image/png")
+        b64_0 = latest["b64_list"][0]
+        bytes_0 = latest["bytes_list"][0]
+
+        show_b64_image(b64_0)
+
+        st.download_button(
+            "⬇️ Download PNG",
+            data=bytes_0,
+            file_name="generated.png",
+            mime="image/png"
+        )
     else:
         st.info("No renders yet. Write a prompt and click **Generate**.")
 
